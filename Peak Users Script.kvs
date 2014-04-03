@@ -1,0 +1,516 @@
+# Peak Users Script
+# =================
+
+# Version 1.2 December 2010
+
+/*
+Copyright (C) 2010-2014 OmegaPhil (OmegaPhil+KVIrc@gmail.com)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.        See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.        If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+# EVENTS BLOCK
+# Intercepting channel messages
+event(OnChannelMessage,PeakUsersScript)
+{
+    # $0 = source nick
+    # $1 = source username
+    # $2 = source host
+    # $3 = message
+    # $4 = [target mode prefixes]
+
+    # Exiting if the script is off
+    if (%PeakUsersScript_Settings{"Status"} == "Off") return
+
+    # Exiting if this channel is not monitored
+    if (%PeakUsersScript_Settings{"Monitored"}{$context.networkName}{$target} == "") return
+    
+    # Exiting if the message is not the !peak trigger
+    If ($3 != "!peak") return
+    
+    # Antispam code - only for users below hop
+    if ($chan.ishalfop($0) == 0 && $chan.isop($0) == 0 && $chan.isadmin($0) == 0 && $chan.isowner($0) == 0)
+    {
+        if (%PeakUsersScript_Data{"Last Peak"} == "")
+        {
+            # !peak is currently usable, setting Last Peak
+            %PeakUsersScript_Data{"Last Peak"}{"Number Of Uses"} = 0
+            %PeakUsersScript_Data{"Last Peak"}{"Time"} = $unixtime
+        }
+        else
+        {
+            # !peak has been used - setting triggerUsed and numberOfUses
+            %triggerUsed = %PeakUsersScript_Data{"Last Peak"}{"Time"}
+            %numberOfUses = %PeakUsersScript_Data{"Last Peak"}{"Number Of Uses"}
+        
+            # Checking whether the trigger has been used within the hour
+            if ($($unixtime - %triggerUsed) <= 3600)
+            {
+                # Trigger has been used within the hour - dropping the trigger silently if the chan has already been informed about the limit
+                if (%numberOfUses == 1) return
+
+                # Messaging chan about the limit
+                msg $target "!peak can only be used once every 60 minutes, or earlier if a new peak is set. Please wait $duration($(3600 - ($unixtime - %triggerUsed))) before using the trigger again."
+
+                # Updating last peak data and exiting
+                %PeakUsersScript_Data{"Last Peak"}{"Number Of Uses"} = 1
+                %PeakUsersScript_Data{"Last Peak"}{"Time"} = $unixtime
+                return
+            }
+
+            # 60 minutes or move have passed, and the trigger has now been used - updating last peak data
+            %PeakUsersScript_Data{"Last Peak"}{"Number Of Uses"} = 0
+            %PeakUsersScript_Data{"Last Peak"}{"Time"} = $unixtime
+        }
+    }
+
+    # Triggering
+    PeakUsersScript "!peak" $context.networkName $target
+}
+
+# Intercepting channel joins
+event(OnJoin,PeakUsersScript)
+{
+    # $0 = nickname
+    # $1 = username
+    # $2 = hostname
+    
+    # Exiting if the script is off
+    if (%PeakUsersScript_Settings{"Status"} == "Off") return
+
+    # Exiting if this channel is not monitored
+    if (%PeakUsersScript_Settings{"Monitored"}{$context.networkName}{$target} == "") return
+    
+    # Channel is monitored - obtaining peak count
+    %peakCount = %PeakUsersScript_Data{$context.networkName}{$target}{"Count"}
+    
+    # Ensuring that the peak count is at least valid
+    if (%peakCount == "") %PeakUsersScript_Data{$context.networkName}{$target}{"Count"} = 0
+    
+    # Checking whether peak count has been breached or not
+    if ($chan.usercount > %peakCount)
+    {
+        # Peak count breached - recording new user peak details
+        %PeakUsersScript_Data{$context.networkName}{$target}{"Nick"} = $0
+        %PeakUsersScript_Data{$context.networkName}{$target}{"Time"} = $unixtime
+        %PeakUsersScript_Data{$context.networkName}{$target}{"Count"} = $chan.usercount
+
+        # Resetting antispam code and saving
+        %PeakUsersScript_Data{"Last Peak"} = ""
+        PeakUsersScript::Save
+
+        # Spamming to the channel that the peak user count has been set
+        msg $target "=={ New peak user count!"$b" $0 "$b"has set the new peak at"$b" $chan.usercount"$b"! }=="
+    }
+}
+
+# Intercepting KVIrc startup
+event(OnKVIrcStartup,PeakUsersScript)
+{
+    # Initialising Peak Users Script
+    PeakUsersScript::Startup
+}
+
+# Intercepting input commands
+event(OnTextInput,PeakUsersScript)
+{
+    # $0 = text
+    
+    # Exiting if the script is off
+    if (%PeakUsersScript_Settings{"Status"} == "Off") return
+
+    # Exiting if this channel is not monitored
+    if (%PeakUsersScript_Settings{"Monitored"}{$context.networkName}{$target} == "") return
+    
+    # Exiting if the command is not the !peak trigger
+    If ($0 != "!peak") return
+
+    # Trigerring (no antispam control). Timer is used with a quarter of a second interval in order to allow the text to be sent to the channel before the response is
+    timer -s ("PeakUsersScript_OnTextInput", 250, $target) PeakUsersScript "!peak" $context.networkName $0
+}
+
+
+# ALIASES BLOCK
+# PeakUsersScript alias
+# Usage: 'h'/'help' - returns this usage information, 'on' - turns the script on, 'off' - turns the script off, 'monitor <network> <channel>' - enable this script for the desired channel, '!peak <network> <channel>' - spams peak information to the relevant channel, 'reset <network> <channel>' - clears the channel's peak record data, 'reload' - reloads peak record data from file, 'unmonitor <network> <channel>' - disable this script for the desired channel
+alias(PeakUsersScript)
+{
+    # Variable allocation
+    %usage = "Usage: 'h'/'help' - returns this usage information, 'on' - turns the script on, 'off' - turns the script off, 'monitor <network> <channel>' - enable this script for the desired channel, '!peak <network> <channel>' - spams peak information to the relevant channel, 'reset <network> <channel>' - clears the channel's peak record data, 'reload' - reloads peak record data from file, 'unmonitor <network> <channel>' - disable this script for the desired channel"
+    
+    # Intercepting status request (nothing passed to the alias)
+    if ($0 == "")
+    {
+        echo "Script is currently %PeakUsersScript_Settings{"Status"}."
+        return
+    }
+
+    # Intercepting help requests and exiting
+    if ($0 == "h" || $0 == "help")
+    {
+        echo %usage
+        return
+    }
+
+    # Intercepting on command
+    if ($0 == "on")
+    {
+        # Informing user if the script is already on
+        if (%PeakUsersScript_Settings{"Status"} == "On")
+        {
+            warning "Peak Users Script is already turned on."
+            return
+        }
+
+        # Turning script on and saving
+        %PeakUsersScript_Settings{"Status"} = "On"
+        PeakUsersScript::Save
+
+        # Informing user the script is turned on and exiting
+        echo "Peak Users Script has been turned on."
+        return
+    }
+
+    # Intercepting off command
+    if ($0 == "Off") 
+    {
+        # Informing user if the script is already off
+        if (%PeakUsersScript == "Off")
+        {
+            warning "Peak Users Script is already turned off."
+            return
+        }
+
+        # Turning script off and saving
+        %PeakUsersScript_Settings{"Status"} = "Off"
+        PeakUsersScript::Save
+
+        # Informing user the script is turned off and exiting
+        echo "Peak Users Script has been turned off."
+        return
+    }
+
+    # Intercepting monitor command
+    if ($0 == "monitor")
+    {
+        # Ensuring a network was passed
+        if ($1 == "") error "PeakUsersScript monitor was called without specifying a network."
+        
+        # Setting network
+        %network = $1
+    
+        # Ensuring a channel was passed
+        if ($2 == "") error "PeakUsersScript monitor was called without specifying a channel. Parameters: '$1-'"
+        
+        # Setting channel
+        %channel = $2
+        
+        # Ensuring channel is not already monitored
+        if (%PeakUsersScript_Settings{"Monitored"}{%network}{%channel} != "") 
+        {
+            warning "The channel %channel on %network is already being monitored."
+            return
+        }
+        
+        # Enabling monitoring for the channel and saving
+        %PeakUsersScript_Settings{"Monitored"}{%network}{%channel} = %channel
+        PeakUsersScript::Save
+        
+        # Informing user that the channel is now monitored
+        echo "Peak Users Script: %channel on %network is now being monitored."
+        return
+    }
+
+    # Detecting !peak trigger
+    if ($0 == "!peak")
+    {
+        # Ensuring a network was passed
+        if ($1 == "") error "PeakUsersScript !peak was called without specifying a network."
+        
+        # Setting network
+        %network = $1
+    
+        # Ensuring a channel was passed
+        if ($2 == "") error "PeakUsersScript !peak was called without specifying a channel. Parameters: '$1-'"
+        
+        # Setting channel
+        %channel = $2
+        
+        # Ensuring channel has peak data
+        if (%PeakUsersScript_Data{%network}{%channel} == "")
+        {
+            warning "PeakUsersScript !peak was called to spam peak data for %channel on %network, however no data has been recorded for this channel."
+            return
+        }
+        
+        # Rebinding to the relevant network if its different from the current one
+        if (%network != $context.networkName)
+        {
+            # Looping through all IRC contexts
+            foreach(%context,$context.list)
+            {
+                # Checking for the desired context
+                if ($context.networkName(%context) == %network)
+                {
+                    # Found - obtaining windowID of the network's console window and rebinding
+                    %windowID = $console(%context)
+                    rebind %windowID
+                    break
+                }
+            }
+    
+            # Erroring if the rebind failed
+            if ($context.networkName != %network) error "Attempt to rebind to %network in order to spam peak data to %channel failed."
+        }
+        
+        # Obtaining peak data
+        %peakUserCount = %PeakUsersScript_Data{%network}{%channel}{"Count"}
+        %peakUserNick = %PeakUsersScript_Data{%network}{%channel}{"Nick"}
+        %peakUserTime = %PeakUsersScript_Data{%network}{%channel}{"Time"}
+        
+        # Spamming peak users info to the channel and exiting
+        msg %channel "Peak user count was %peakUserCount, set by %peakUserNick on $date("d/m/y H:M:S z", %peakUserTime), $duration($($unixtime - %peakUserTime)) ago."
+        return
+    } 
+    
+    # Intercepting reload command
+    if ($0 == "reload")
+    {
+        # Reloading hash and informing user
+        PeakUsersScript::Load
+        echo "Peak Users Script has successfully reloaded peak data."
+        return
+    }
+
+    # Intercepting reset command
+    if ($0 == "reset")
+    {
+        # Ensuring a network was passed
+        if ($1 == "") error "PeakUsersScript reset was called without specifying a network."
+        
+        # Setting network
+        %network = $1
+    
+        # Ensuring a channel was passed
+        if ($2 == "") error "PeakUsersScript reset was called without specifying a channel. Parameters: '$1-'"
+        
+        # Setting channel
+        %channel = $2
+        
+        # Ensuring channel has peak data
+        if (%PeakUsersScript_Data{%network}{%channel} == "") error "PeakUsersScript reset was called to reset peak data for %channel on %network, however no data has been recorded."
+        
+        # Resetting channel peak data and saving
+        %PeakUsersScript_Data{%network}{%channel} = ""
+        PeakUsersScript::Save
+        return
+    }
+
+    # Intercepting unmonitor command
+    if ($0 == "unmonitor")
+    {
+        # Ensuring a network was passed
+        if ($1 == "") error "PeakUsersScript unmonitor was called without specifying a network."
+        
+        # Setting network
+        %network = $1
+    
+        # Ensuring a channel was passed
+        if ($2 == "") error "PeakUsersScript unmonitor was called without specifying a channel. Parameters: '$1-'"
+        
+        # Setting channel
+        %channel = $2
+        
+        # Ensuring channel is currently monitored
+        if (%PeakUsersScript_Settings{"Monitored"}{%network}{%channel} == "") 
+        {
+            warning "The channel %channel on %network is not currently monitored."
+            return
+        }
+        
+        # Disabling monitoring for the channel and saving
+        %PeakUsersScript_Settings{"Monitored"}{%network}{%channel} = ""
+        PeakUsersScript::Save
+
+        # Informing user that the channel is no longer monitored
+        echo "Peak Users Script: %channel on %network is no longer being monitored."
+        return
+    }
+
+    # Warning user of an unrecognised command
+    warning "Command unrecognised - use h/help for usage instructions."
+}
+
+# PeakUsersScript::Load
+alias(PeakUsersScript::Load)
+{
+    # Loading settings if the config file exists
+    if ($file.exists($file.localdir("/scripts/peak_users_script_settings")) == $true)
+    {
+        # Opening config file
+        %configFileID = $config.open($file.localdir("/scripts/peak_users_script_settings"))
+        
+        # Loading PeakUsersScript_Settings
+        %PeakUsersScript_Settings = $unserialize($config.read(%configFileID, "PeakUsersScript_Settings"))
+        
+        # Loading PeakUsersScript_Data
+        config.setsection %configFileID "Data"
+        %PeakUsersScript_Data = $unserialize($config.read(%configFileID, "PeakUsersScript_Data"))
+        
+        # Closing configuration file
+        config.close %configFileID
+    }
+    
+    # Initialising hash data if needed
+    if (%PeakUsersScript_Settings{"Status"} == "") %PeakUsersScript_Settings{"Status"} == "On"
+}
+
+# PeakUsersScript::Save alias
+alias(PeakUsersScript::Save)
+{
+    # Opening config file
+    %configFileID = $config.open($file.localdir("/scripts/peak_users_script_settings"))
+    
+    # Saving PeakUsersScript_Settings
+    config.clearsection %configFileID "KVIrc"
+    config.write %configFileID "PeakUsersScript_Settings" $serialize(%PeakUsersScript_Settings)
+    
+    # Saving PeakUsersScript_Data
+    config.clearsection %configFileID "Data"
+    config.setsection %configFileID "Data"
+    config.write %configFileID "PeakUsersScript_Data" $serialize(%PeakUsersScript_Data)
+
+    # Committing settings
+    config.close %configFileID
+}
+
+# PeakUsersScript::Startup alias
+alias(PeakUsersScript::Startup)
+{
+    # Ensuring that dependencies are present
+    if ($aliasBody("CommonScriptingServices::uninstall::uninstall") == "") error "Common Scripting Services has not been detected - this is required for this script to run."
+
+    # Making sure settings directory exists
+    if ($file.exists($file.localdir("/scripts/")) == 0) file.mkdir $file.localdir("/scripts/")
+
+    # Loading settings
+    PeakUsersScript::Load
+    
+    # Integrating into main toolbar
+    if ($popup.exists("PeakUsersScript_Main")) popup.destroy "PeakUsersScript_Main"
+    popup.create "PeakUsersScript_Main"
+    popup.addItem("PeakUsersScript_Main", "Turn script on",,, \%PeakUsersScript_Settings{\"Status\"} == \"Off\") PeakUsersScript "on"
+    popup.addItem("PeakUsersScript_Main", "Turn script off",,, \%PeakUsersScript_Settings{\"Status\"} == \"On\") PeakUsersScript "off"
+    popup.addSeparator "PeakUsersScript_Main"
+    popup.addItem("PeakUsersScript_Main", "List monitored channels on all networks")
+    {
+        echo "Echoing all monitored channels on all networks:"
+        
+        # Looping through all monitored networks
+        foreach(%network,$sort($keys(%PeakUsersScript_Settings{"Monitored"})))
+        {
+            if (%network != "Last Peak")
+            {
+                # Echoing data on network
+                echo "-"
+                echo "Network "$b%network":"$b
+                echo "-"
+
+                # Looping through all monitored channels
+                foreach(%channel,$sort($keys(%PeakUsersScript_Settings{"Monitored"}{%network})))
+                {
+                    echo "Channel: "%channel
+                }
+            }
+        }
+
+        echo "-"
+        echo "Monitored channel echoing completed."
+    }
+    
+    # Adding Peak Users Script menu to main script popup (ensuring that it doesn't exist already)
+    popup.delitem -q "Scripts" "PeakUsersScript_Main"
+    popup.addExtPopup "Scripts" "PeakUsersScript_Main" "Peak Users Script" "" "PeakUsersScript_Main"
+    
+    # Tying main script popup to KVIrc menu (appears after 'Scripting')
+    setmenu -i=2 "Scripts" "Scripts"
+
+    # Integrating into channel popup
+    # Creating script popup
+    if ($popup.exists("PeakUsersScript_Channel")) popup.destroy "PeakUsersScript_Channel"
+    popup.create "PeakUsersScript_Channel"
+    
+    # Monitor channel setting
+    popup.additem("PeakUsersScript_Channel", "Monitor "\$target,,, \%PeakUsersScript_Settings{\"Monitored\"}{\$context.networkName}{\$target} == \"\")
+    {
+        # Channel is not monitored - adding monitoring
+        PeakUsersScript monitor $context.networkName $target
+    }
+
+    # Unmonitor channel setting
+    popup.additem("PeakUsersScript_Channel", "Unmonitor "\$target,,, \%PeakUsersScript_Settings{\"Monitored\"}{\$context.networkName}{\$target} != \"\")
+    {
+        # Channel is monitored - removing monitoring
+        PeakUsersScript unmonitor $context.networkName $target
+    }
+
+    # Adding Peak Users Script menu to channel popup (ensuring that it doesn't exist already)
+    popup.delitem -q "channeltextview" "PeakUsersScript_Channel"
+    popup.addSeparator "channeltextview" "PeakUsersScript_Channel_Separator" "\%PeakUsersScript_Settings{\"Status\"} == \"On\""
+    popup.addExtPopup "channeltextview" "PeakUsersScript_Channel" "Peak Users Script" "" "PeakUsersScript_Channel" "\%PeakUsersScript_Settings{\"Status\"} == \"On\""
+}
+
+# Uninstaller alias
+alias(PeakUsersScript::uninstall::uninstall)
+{
+    # All events and aliases should be uninstalled here
+    alias(PeakUsersScript) {}
+    alias(PeakUsersScript::Load) {}
+    alias(PeakUsersScript::Save) {}
+    alias(PeakUsersScript::Startup) {}
+    alias(PeakUsersScript::uninstall::uninstall) {}
+    event(OnJoin,PeakUsersScript) {}
+    event(OnKVIrcStartup,PeakUsersScript) {}
+    event(OnTextInput,PeakUsersScript) {}
+    
+    # Removing popups
+    popup.delitem -q "Scripts" "PeakUsersScript_Main"
+    popup.delitem -q "channeltextview" "PeakUsersScript_Channel"
+    popup.delitem -q "channeltextview" "PeakUsersScript_Channel_Separator"
+    popup.destroy -q "PeakUsersScript_Main"
+    popup.destroy -q "PeakUsersScript_Channel"
+    
+    # Clearing global variables
+    %PeakUsersScript_Settings = ""
+    %PeakUsersScript_Data = ""
+}
+
+
+# COMMENTS
+
+# %PeakUsersScript_Settings format:
+
+# Item: {"Status"}. Data: 'On'/Off' - indicates the state of the script.
+# Item: {"Monitored"}. Data: All of the channels that are currently monitored by this script.
+# Item: {"Monitored"}{<network>}{<channel>}. Presence indicates channel is monitored.
+
+# %PeakUsersScript_Data format:
+
+# Item: {"Last Peak"}. Data: Information on the last usage of the !peak trigger.
+# Item: {"Last Peak"}{"Number Of Uses"}. Data: Number of times trigger has been used since last reset.
+# Item: {"Last Peak"}{"Time"}. Data: $unixtime of last use.
+# Item: {<network>}{<channel>}{"Count"}. Data: Peak user count of channel.
+# Item: {<network>}{<channel>}{"Nick"}. Data: Nick of user Peak user count of channel.
+# Item: {<network>}{<channel>}{"Time"}. Data: $unixtime the peak user count was set.
