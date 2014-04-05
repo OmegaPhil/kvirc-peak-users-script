@@ -62,7 +62,10 @@ Commands
 The following commands are available:
 
     /PeakUsersScript <command>
-    
+
+    <no command>
+        Returns the on/off state of the script
+
     help, h
         Returns this usage information
         
